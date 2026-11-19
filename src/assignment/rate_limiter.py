@@ -14,9 +14,13 @@ from google.genai import types
 
 
 class RateLimitPlugin(base_plugin.BasePlugin):
-    """Block users who exceed max_requests within window_seconds."""
+    """Allow at most max_requests per user in each rolling time window."""
 
     def __init__(self, max_requests: int = 10, window_seconds: int = 60):
+        if max_requests < 1:
+            raise ValueError("max_requests must be >= 1")
+        if window_seconds < 1:
+            raise ValueError("window_seconds must be >= 1")
         super().__init__(name="rate_limiter")
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -31,19 +35,23 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         )
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
-        """Return Content to block, or None to allow."""
+        """Return a blocking Content response, or None when request is allowed."""
         self.total_count += 1
         user_id = getattr(invocation_context, "user_id", None) or "anonymous"
         now = time.time()
         window = self.user_windows[user_id]
+        cutoff = now - self.window_seconds
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        # Remove timestamps outside the rolling window.
+        while window and window[0] <= cutoff:
+            window.popleft()
+
+        if len(window) >= self.max_requests:
+            self.blocked_count += 1
+            wait = max(0.0, self.window_seconds - (now - window[0]))
+            return self._block_response(
+                f"Rate limit exceeded. Try again in {wait:.0f}s."
+            )
+
+        window.append(now)
+        return None
